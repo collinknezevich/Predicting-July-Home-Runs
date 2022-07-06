@@ -1,0 +1,299 @@
+---
+title: "Predicting July HRs"
+author: "Collin Knezevich"
+date: '2022-06-29'
+output: html_document
+---
+
+This project is based on a challenge from NCSU Sports Analytics Club. The goal is to create a lineup of batters that will hit the most Home Runs in the month of July.   
+
+To build our model, we will be using data from the 2018 and 2019 seasons (the most recent consecutive full seasons). For our predictions, we will be using data from the 2021 and 2022 seasons.    
+
+We will consider a number of variables for our model. We will narrow down our variables by using regression subsets, with Forward Selection and Backwards Elimination. We will then choose one of these models as our final model to fit/use for prediction. Since our response variable is a "count" variable (count of HRs), we will use Poisson regression.     
+
+# Variables to Consider/Data Collection
+
+All data used in this project will be sourced from [Fangraphs](www.fangraphs.com). 
+
+Here are the variables we will consider for our model. First, we would like to consider a batter's performance from the previous season (2018 and 2021, respectively). We will only be considering "qualified" batters in our analysis -- batters that have reached a minimum number of Plate Appearances (502 over an entire season). Since our primary focus is to predict the number of HRs a player will hit, we will use the following metrics to illustrate a player's ability to hit HRs in their previous season:   
+- *prevHRG*: the total number of HRs hit by a player, divided by the number of games they played  
+- *prevSLG*: Slugging%, the total bases earned by a batter divided by their number of at bats  
+- *prevISO*: Isolated Power, a batter's slugging% minus their batting average   
+- *prevHRFB*: HR/FB%, the proportion of fly balls a batter hits that are HRs   
+- *prevFB*: FB%, the percentage of a batter's batted balls that are fly balls   
+- *prevHard*: Hard%, the percentage of a batter's batted balls that are considered "hard-hit" (exit velocity >= 95 MPH)    
+
+Next, we will consider a batter's performance during the current season (2019 and 2022, respectively). We will still only be considering qualified batters, defined as reaching 3.1 Plate Appearances per team game. We will obtain data for these batters through the end of June, using these metrics:   
+- *ytdHRG*   
+- *ytdISO*   
+- *ytdHRFB*   
+- *ytdFB*   
+- *ytdHard*   
+- *ytdwRCPlus*: a batter's Runs Created (a measure of overall offensive performance), adjusted for external factors such as ballparks, and weighted to the league average   
+
+We will also obtain the total number of HRs hit by batters in June 2019 as our response variable to fit our model (again, limiting to qualified batters based on reaching 3.1 Plate Appearances per team game). 
+
+# Reading in Data 
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+```
+
+```{r}
+# reading in and cleaning 2018 data 
+dat2018 <- read_csv("2018-Stats.csv")
+dat2018 <- as_tibble(dat2018)
+
+# remove Team variable - not needed 
+dat2018 <- dat2018 %>% select(-Team)
+
+# calculate HR/G - remove HR and G variables, no longer needed 
+dat2018 <- dat2018 %>% mutate(prevHRG = HR/G) %>% select(-c(HR, G))
+
+# change column names 
+colnames(dat2018) <- c("name", "prevISO", "prevSLG", "prevFB", "prevHRFB", 
+                       "prevHard", "playerid", "prevHRG")
+
+# percentage variables read in as characters - remove % sign from observations 
+# and convert to dbl 
+dat2018$prevFB <- dat2018$prevFB %>% str_replace("%", "")
+dat2018$prevFB <- (as.numeric(dat2018$prevFB))/100
+
+dat2018$prevHRFB <- dat2018$prevHRFB %>% str_replace("%", "") 
+dat2018$prevHRFB <- (as.numeric(dat2018$prevHRFB))/100
+
+dat2018$prevHard <- dat2018$prevHard %>% str_replace("%", "")
+dat2018$prevHard <- (as.numeric(dat2018$prevHard))/100
+```
+
+```{r}
+# reading in and cleaning 2019 data 
+dat2019 <- read_csv("2019-Stats-Thru-June.csv")
+dat2019 <- as_tibble(dat2019)
+
+# remove Team variable - not needed 
+dat2019 <- dat2019 %>% select(-Team)
+
+# calculate HR/G - remove HR and G variables, no longer needed 
+dat2019 <- dat2019 %>% mutate(prevHRG = HR/G) %>% select(-c(HR, G))
+
+# change column names 
+colnames(dat2019) <- c("name", "ytdISO", "ytdwRCPlus", "ytdFB", "ytdHRFB", 
+                       "ytdHard", "playerid", "ytdHRG")
+
+# percentage variables read in as characters - remove % sign from observations 
+# and convert to dbl 
+dat2019$ytdFB <- dat2019$ytdFB %>% str_replace("%", "")
+dat2019$ytdFB <- (as.numeric(dat2019$ytdFB))/100
+
+dat2019$ytdHRFB <- dat2019$ytdHRFB %>% str_replace("%", "") 
+dat2019$ytdHRFB <- (as.numeric(dat2019$ytdHRFB))/100
+
+dat2019$ytdHard <- dat2019$ytdHard %>% str_replace("%", "")
+dat2019$ytdHard <- (as.numeric(dat2019$ytdHard))/100
+```
+
+```{r}
+# reading in response variable - July 2019 HRs 
+dat2019July <- read_csv("2019-July-HRs.csv")
+dat2019July <- as_tibble(dat2019July)
+
+# remove team variable - not needed 
+dat2019July <- dat2019July %>% select(-Team) 
+
+# change column names 
+colnames(dat2019July) <- c("name", "JulyHR", "playerid")
+```
+
+```{r}
+# merging 2018, 2019, 2019July data for model building 
+
+# remove name variable from 2019, 2019July -- redundant info 
+dat2019 <- dat2019 %>% select(-name)
+dat2019July <- dat2019July %>% select(-name)
+
+# merge 2018 and 2019 data - inner join so that it only includes batters who 
+# were qualified in both 2018 and 2019 
+dat1819 <- inner_join(dat2018, dat2019, by = "playerid")
+
+# merge that result with July data 
+dat1819 <- inner_join(dat1819, dat2019July, by = "playerid")
+```
+
+```{r}
+# reading in and cleaning 2021 data 
+dat2021 <- read_csv("2021-Stats.csv") 
+dat2021 <- as_tibble(dat2021)
+
+# remove Team variable - not needed
+dat2021 <- dat2021 %>% select(-Team)
+
+# calculate HR/G - remove HR and G variables, no longer needed 
+dat2021 <- dat2021 %>% mutate(prevHRG = HR/G) %>% select(-c(HR, G))
+
+# change column names 
+colnames(dat2021) <- c("name", "prevISO", "prevSLG", "prevFB", "prevHRFB", 
+                       "prevHard", "playerid", "prevHRG")
+
+# percentage signs read in as characters - remove % sign from observations 
+# and convert to dbl 
+dat2021$prevFB <- dat2021$prevFB %>% str_replace("%", "")
+dat2021$prevFB <- (as.numeric(dat2021$prevFB))/100
+
+dat2021$prevHRFB <- dat2021$prevHRFB %>% str_replace("%", "") 
+dat2021$prevHRFB <- (as.numeric(dat2021$prevHRFB))/100
+
+dat2021$prevHard <- dat2021$prevHard %>% str_replace("%", "")
+dat2021$prevHard <- (as.numeric(dat2021$prevHard))/100
+```
+
+```{r}
+# reading in and cleaning 2022 data 
+dat2022 <- read_csv("2022-Stats-Thru-June.csv")
+dat2022 <- as_tibble(dat2022)
+
+# remove Team variable - not needed 
+dat2022 <- dat2022 %>% select(-Team)
+
+# calculate HR/G - remove HR and G variables, no longer needed 
+dat2022 <- dat2022 %>% mutate(prevHRG = HR/G) %>% select(-c(HR, G))
+
+# change column names 
+colnames(dat2022) <- c("name", "ytdwRCPlus", "ytdISO", "ytdHRFB", "ytdFB",  
+                       "ytdHard", "playerid", "ytdHRG")
+
+# percentage variables read in as characters - remove % sign from observations 
+# and convert to dbl 
+dat2022$ytdFB <- dat2022$ytdFB %>% str_replace("%", "")
+dat2022$ytdFB <- (as.numeric(dat2022$ytdFB))/100
+
+dat2022$ytdHRFB <- dat2022$ytdHRFB %>% str_replace("%", "") 
+dat2022$ytdHRFB <- (as.numeric(dat2022$ytdHRFB))/100
+
+dat2022$ytdHard <- dat2022$ytdHard %>% str_replace("%", "")
+dat2022$ytdHard <- (as.numeric(dat2022$ytdHard))/100
+```
+
+```{r}
+# merging 2021 and 2022 data for predictions 
+
+# remove name variable from 2022 -- redundant info 
+dat2022 <- dat2022 %>% select(-name)
+
+# merge 2021 and 2022 data - inner join so that it only includes batters who 
+# were qualified in both 2021 and 2022
+dat2122 <- inner_join(dat2021, dat2022, by = "playerid")
+```
+
+# Model Building 
+
+Now that we have our full, combined dataset for 2018 and 2019, we can begin to build our model. We will see which of our candidate variables are selected by the Forwards Selection and Backwards Elimination methods.
+```{r}
+library(leaps)
+``` 
+
+```{r}
+# forwards selection 
+forward <- regsubsets(JulyHR ~ prevISO + prevSLG + prevFB + prevHRFB + prevHard + 
+                        prevHRG + ytdISO + ytdwRCPlus + ytdFB + ytdHRFB + 
+                        ytdHard + ytdHRG, 
+                      data = dat1819, method = "forward")
+summary(forward)
+```
+The best model with 8 variables selected the following variables: prevISO, prevHRFB, prevHard, prevHRG, ytdISO, ytdwRCPlus, ytdFB, ytdHard. We will fit a Poisson regression model with these variables. 
+```{r}
+# fitting forwards-selected model 
+forwardModel <- glm(JulyHR ~ prevISO + prevHRFB + prevHard + prevHRG + ytdISO + 
+                      ytdwRCPlus + ytdFB + ytdHard, 
+                    data = dat1819, family = "poisson")
+```
+
+Now we can try the same with backwards selection. 
+```{r}
+# backwards selection 
+backward <- regsubsets(JulyHR ~ prevISO + prevSLG + prevFB + prevHRFB + prevHard + 
+                        prevHRG + ytdISO + ytdwRCPlus + ytdFB + ytdHRFB + 
+                        ytdHard + ytdHRG, 
+                      data = dat1819, method = "backward")
+summary(backward)
+```
+The best model with 8 variables selected the following variables: prevISO, prevSLG, prevHRFB, prevHard, ytdISO, ytdwRCPlus, ytdFB, ytdHard. We will fit a Poisson regression model with these variables.
+```{r}
+backwardModel <- glm(JulyHR ~ prevISO + prevSLG + prevHRFB + prevHard + ytdISO + 
+                      ytdwRCPlus + ytdFB + ytdHard, 
+                    data = dat1819, family = "poisson")
+```
+
+Now, we would like to compare these models. We will use RMSE to compare the models and select the better option. 
+```{r}
+library(Metrics)
+```
+
+```{r}
+# creating predictions 
+predForward <- predict(forwardModel, dat1819, type = "response")
+predBackward <- predict(backwardModel, dat1819, type = "response")
+
+# finding RMSEs 
+results <- data.frame(model = c("Forward", "Backward"), 
+                      rmse = c(rmse(predForward, dat1819$JulyHR), 
+                             c(rmse(predBackward, dat1819$JulyHR))))
+
+results %>% arrange(rmse)
+```
+We can see that the models perform roughly the same, but Forward is just slightly better. So we will choose to use this model to predict July 2022 HRs. Out of curiosity, let us examine the lineup that the model chose for 2019. 
+```{r}
+dat1819 %>% mutate(predictHRs = predForward) %>% 
+  select(name, predictHRs, JulyHR, everything()) %>% 
+  arrange(desc(predictHRs))
+```
+Our model predicted that the following lineup would hit the most HRs in July 2019 (actual July HR in parentheses):   
+- *DH*: J.D. Martinez (5)   
+- *C*: Yasmani Grandal (1)   
+- *1B*: Paul Goldschmidt (11)   
+- *2B*: Rougned Odor (8)   
+- *3B*: Eugenio Suarez (12)   
+- *SS*: Trevor Story (5)   
+- *LF*: Tommy Pham (3)   
+- *CF*: Mike Trout (13)   
+- *RF*: Christian Yelich (7)   
+For a total of 65 HRs.    
+
+The actual lineup with the most HRs in July 2019 was:    
+- *DH*: Nelson Cruz (10)   
+- *C*: Travis d'Arnaud (8)    
+- *1B*: Yuli Gurriel (12)   
+- *2B*: Rougned Odor (8)   
+- *3B*: Eugenio Suarez (12)   
+- *SS*: Fernando Tatis Jr. (8)   
+- *LF*: Juan Soto (6)    
+- *CF*: Mike Trout (13)   
+- *RF*: Max Kepler (8)   
+For a total of 85 HRs. 
+
+# July 2022 Predictions 
+
+Now that we have built our model, we can use data from the current season and the previous season to predict the lineup that will hit the most HRs in July 2022. We will build and list our predictions below. 
+```{r}
+# creating predictions 
+preds2022 <- predict(forwardModel, dat2122, type = "response")
+
+# results 
+dat2122 %>% mutate(predictHRs = preds2022) %>% 
+  select(name, predictHRs, everything()) %>% 
+  arrange(desc(predictHRs))
+```
+For the purposes of the competition, we will remove any players that are injured or are otherwise not expected to play during the month of July. For predictions purposes, all players are listed above, regardless of injury status.   
+
+Thus, our prediction for the lineup that will hit the most HRs in July 2022 are:   
+- *DH*: Shohei Ohtani   
+- *C*: J.T. Realmuto   
+- *1B*: Jose Abreu    
+- *2B*: Marcus Semien   
+- *3B*: Max Muncy   
+- *SS*: Dansby Swanson    
+- *LF*: Lourdes Gurriel Jr.    
+- *CF*: Aaron Judge   
+- *RF*: Kyle Tucker   
+
+We will revisit these predictions at the end of July. 
